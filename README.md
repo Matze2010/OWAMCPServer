@@ -14,10 +14,10 @@ Das Tool stellt dem Modell zwei Funktionen bereit:
 
 | Funktion | Zweck |
 |---|---|
-| `send_email` | E-Mail versenden: To/Cc/Bcc, Betreff, Text- oder HTML-Body, Wichtigkeit, Reply-To |
+| `send_email` | E-Mail versenden: To/Cc/Bcc, Betreff, Text- oder HTML-Body, Wichtigkeit, Reply-To, Anhänge |
 | `check_exchange_connection` | Verbindung und Zugangsdaten prüfen, ohne etwas zu senden |
 
-**Nicht enthalten:** Anhänge, Lesen oder Empfangen von Mail, Kalender, Kontakte, Impersonation
+**Nicht enthalten:** Lesen oder Empfangen von Mail, Kalender, Kontakte, Impersonation
 über ein Dienstkonto.
 
 **Zwei Schutzmechanismen sind standardmäßig aktiv:**
@@ -66,6 +66,11 @@ Zu finden unter **Workspace → Tools → *dieses Tool* → Valves**.
 | `allowed_recipient_domains` | Text | – | Kommaliste erlaubter Empfängerdomänen. Leer = alle erlaubt. |
 | `blocked_recipient_domains` | Text | – | Kommaliste gesperrter Domänen. **Schlägt die Allowlist.** |
 | `max_recipients` | Zahl | `25` | Obergrenze über To + Cc + Bcc zusammen. |
+| `allow_attachments` | Ja/Nein | `Ja` | Anhänge zulassen. Ist die Option aus, wird eine Nachricht **mit** Anhängen abgelehnt statt ohne sie zu senden. |
+| `max_attachments` | Zahl | `5` | Maximale Anzahl Anhänge je Nachricht. |
+| `max_attachment_size_mb` | Zahl | `10` | Maximale Größe **eines** Anhangs in MB, gemessen nach dem Dekodieren. |
+| `max_total_attachment_size_mb` | Zahl | `25` | Maximale Gesamtgröße aller Anhänge in MB, gemessen nach dem Dekodieren. |
+| `blocked_attachment_extensions` | Text | `exe,com,bat,…` | Kommaliste gesperrter Dateiendungen. Groß-/Kleinschreibung egal, führender Punkt optional. Leer = alle erlaubt. |
 | `auto_detect_html` | Ja/Nein | `Ja` | Body als HTML behandeln, wenn er erkennbar Markup enthält. |
 | `emit_status` | Ja/Nein | `Ja` | Fortschrittsmeldungen im Chat anzeigen. |
 | `debug_errors` | Ja/Nein | `Nein` | Technischen Exception-Typ und -Text an Fehlermeldungen anhängen. |
@@ -126,6 +131,8 @@ Beispiel-Prompts:
 > Sende die Zusammenfassung an team@example.com, mit max@example.com in CC, als HTML und mit hoher
 > Wichtigkeit.
 
+> Schick das gerade erstellte Protokoll als Textdatei im Anhang an anna.beispiel@example.com.
+
 Hinweise:
 
 - **Empfänger** werden kommagetrennt angegeben (`a@example.com, b@example.com`). Semikolon,
@@ -139,6 +146,35 @@ Hinweise:
 - **Bcc:** In der Erfolgsmeldung erscheinen Bcc-Adressen nur als **Anzahl**. Sie zurück in das
   Chat-Protokoll zu schreiben, würde den Zweck von Bcc aufheben. Im Trockenlauf werden sie
   vollständig angezeigt, da nichts zugestellt wurde.
+
+### Anhänge
+
+Anhänge werden dem Parameter `attachments` als **JSON-Array** übergeben, der Dateiinhalt jeweils
+als **base64**-String:
+
+```json
+[
+  {"filename": "bericht.pdf", "content_base64": "JVBERi0xLjQK…", "content_type": "application/pdf"},
+  {"filename": "notiz.txt",   "content_base64": "SGFsbG8gV2VsdA=="}
+]
+```
+
+- `content_type` ist **optional** und wird sonst aus der Dateiendung abgeleitet, ersatzweise
+  `application/octet-stream`.
+- Toleriert werden ein `data:…;base64,`-Präfix, Zeilenumbrüche im base64-String, das URL-sichere
+  Alphabet und fehlendes Padding — all das kommt in Modellausgaben vor.
+- Dateinamen werden auf den reinen Namen reduziert: Pfadangaben wie `../../etc/passwd` werden zu
+  `passwd`, Steuerzeichen entfernt, überlange Namen gekürzt. Jede Änderung erscheint als Hinweis
+  im Ergebnis.
+- **Ganze Nachricht oder gar nichts:** Ist ein Anhang unbrauchbar, zu groß, zu zahlreich oder hat
+  eine gesperrte Endung, wird die komplette Nachricht abgelehnt. Eine Mail ohne den Anhang zu
+  senden, den der Nutzer angehängt haben wollte, wäre schlimmer als ein klarer Fehler.
+- **Praktische Obergrenze ist das Kontextfenster des Modells**, nicht die Valve. base64 bläht den
+  Inhalt um Faktor 4/3 auf, und der komplette String muss durch den Chat-Kontext. Ein paar hundert
+  KB sind realistisch, mehrere MB nicht. Die Valves `max_attachment_size_mb` und
+  `max_total_attachment_size_mb` sind die harte Grenze davor, das Exchange-Limit die dahinter.
+- Modelle sollen base64-Inhalte **nicht erfinden**. Der Parameter ist für Dateien gedacht, die das
+  Modell tatsächlich vorliegen hat — etwa aus einem hochgeladenen Dokument oder einem anderen Tool.
 
 ## Bestätigung vor dem Versand
 
@@ -164,8 +200,9 @@ Im Trockenlauf entfällt die Rückfrage, weil ohnehin nichts gesendet wird.
 ## Testbetrieb (Trockenlauf)
 
 Ist `dry_run` aktiv, führt `send_email` die **vollständige Validierung** durch — Zugangsdaten
-vorhanden, Adressen gültig, Domain-Policy, Empfängerlimit, Betreff und Body — und gibt anschließend
-eine Vorschau der Nachricht zurück. Es wird **keine Verbindung** aufgebaut und **nichts gesendet**.
+vorhanden, Adressen gültig, Domain-Policy, Empfängerlimit, Betreff, Body und Anhänge — und gibt
+anschließend eine Vorschau der Nachricht zurück. Es wird **keine Verbindung** aufgebaut und
+**nichts gesendet**. Anhänge werden dabei bereits dekodiert und geprüft.
 
 ```
 DRY RUN - NO EMAIL WAS SENT
@@ -175,6 +212,8 @@ made and nothing was delivered.
 The following message WOULD have been sent:
 From:       alice@example.com
 To:         bob@example.com
+...
+Attachments: bericht.pdf (960 B, application/pdf), notiz.txt (10 B, text/plain)
 ...
 DRY RUN - NO EMAIL WAS SENT. Disable the 'dry_run' valve to send for real.
 ```
@@ -207,6 +246,14 @@ Wichtig zu wissen:
 - **Prompt Injection:** Über den Inhalt entscheidet das Modell, und dessen Kontext kann
   fremdbestimmte Inhalte enthalten. Bestätigungsabfrage, Domain-Richtlinie, `max_recipients` und
   `dry_run` sind die Schutzmechanismen dagegen; HTML wird zusätzlich von aktiven Inhalten befreit.
+- **Anhänge** stammen aus demselben Modellkontext und sind deshalb genauso wenig vertrauenswürdig
+  wie der Body. `blocked_attachment_extensions` verhindert die offensichtlich gefährlichen Typen
+  bereits im Tool statt erst auf dem Exchange-Server; Dateinamen werden auf einen reinen Namen ohne
+  Pfad und Steuerzeichen reduziert. Der Inhalt selbst wird **nicht** inspiziert — ein
+  Virenscanner auf dem Mailserver bleibt notwendig.
+- **Anhangsinhalte erscheinen nie im Chat.** Ausgegeben werden ausschließlich Dateiname, Größe und
+  Content-Type; der base64-String wird weder in Erfolgsmeldung noch Trockenlauf, Bestätigung oder
+  Fehlermeldung zurückgeschrieben.
 
 ## Fehlerbehebung
 
@@ -220,6 +267,10 @@ Wichtig zu wissen:
 | `You are not allowed to send as this address` | `email_address` passt nicht zu einem Postfach, aus dem `username` senden darf. |
 | Zeitüberschreitungen | `request_timeout` erhöhen und Open WebUI neu starten. |
 | `exchangelib is not available` | `requirements:`-Header im Tool prüfen und ob der Open-WebUI-Container PyPI erreicht. |
+| `is not valid base64` / `is truncated` | Der Anhang kam unvollständig im Tool an — meist, weil der base64-String das Kontextfenster gesprengt hat. Kleinere Datei verwenden. |
+| `not valid JSON` bei `attachments` | Das Modell hat kein JSON-Array geliefert. Format siehe Abschnitt „Anhänge". |
+| `has the blocked file extension` | Die Endung steht in `blocked_attachment_extensions`. Bewusst entscheiden, bevor sie entfernt wird. |
+| `The attachments exceed the size limit configured on the server` | Exchange-seitiges Limit. Die Valves `max_attachment_size_mb` / `max_total_attachment_size_mb` darunter einstellen. |
 | Altes Passwort funktioniert noch | exchangelib hält Verbindungen prozessweit im Cache. Der alte Eintrag verfällt erst mit einem Neustart von Open WebUI. |
 | Keine Bestätigungsabfrage, aber es wird gesendet | `require_confirmation` ist deaktiviert. |
 
@@ -233,7 +284,7 @@ durch aufzeichnende Doubles ersetzt.
 
 ```bash
 uv sync --group dev
-uv run pytest          # 144 Tests
+uv run pytest          # 231 Tests
 uv run ruff check .
 uv run ruff format --check .
 ```
@@ -244,7 +295,9 @@ lokalen Entwicklung.
 
 ## Bekannte Einschränkungen
 
-- Keine Anhänge.
+- Anhänge müssen als base64 durch den Chat-Kontext des Modells. Die praktische Obergrenze ist
+  damit das Kontextfenster, nicht die konfigurierte Valve — große Dateien sind so nicht versendbar.
+  Anhänge aus dem Dateisystem oder von einer URL kann das Tool nicht laden.
 - Kein Lesen, Suchen oder Empfangen von Mail; kein Kalender, keine Kontakte.
 - Kein Impersonation-Modus über ein Dienstkonto — jeder Nutzer sendet mit eigenen Zugangsdaten.
 - `verify_ssl`, `ca_bundle_path` und `request_timeout` wirken prozessweit und erfordern nach einer

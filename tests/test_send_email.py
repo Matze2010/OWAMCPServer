@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import base64
 import importlib
+import json
 import sys
 
 import pytest
@@ -20,6 +22,18 @@ async def send(tool, user, **overrides):
     }
     kwargs.update(overrides)
     return await tool.send_email(**kwargs)
+
+
+def attachment_arg(*specs):
+    """Build the JSON the model would emit. Each spec is (filename, content[, type])."""
+    payload = []
+    for spec in specs or (("notes.txt", b"hello"),):
+        filename, content = spec[0], spec[1]
+        item = {"filename": filename, "content_base64": base64.b64encode(content).decode()}
+        if len(spec) > 2:
+            item["content_type"] = spec[2]
+        payload.append(item)
+    return json.dumps(payload)
 
 
 # --------------------------------------------------------------------------
@@ -435,6 +449,170 @@ async def test_a_throwing_emitter_does_not_break_sending(tool, user_ok, fake_exc
 
 
 # --------------------------------------------------------------------------
+# Attachments
+# --------------------------------------------------------------------------
+
+
+async def test_attachment_reaches_the_message(tool, user_ok, fake_exchange):
+    await send(tool, user_ok, attachments=attachment_arg(("report.pdf", b"%PDF-1.4", "application/pdf")))
+
+    attachments = FakeMessage.instances[0].attachments
+    assert len(attachments) == 1
+    assert attachments[0].name == "report.pdf"
+    assert attachments[0].content == b"%PDF-1.4"
+    assert attachments[0].content_type == "application/pdf"
+
+
+async def test_content_type_is_derived_from_the_filename(tool, user_ok, fake_exchange):
+    await send(tool, user_ok, attachments=attachment_arg(("notes.txt", b"hello")))
+
+    assert FakeMessage.instances[0].attachments[0].content_type == "text/plain"
+
+
+async def test_several_attachments_keep_their_order(tool, user_ok, fake_exchange):
+    await send(
+        tool,
+        user_ok,
+        attachments=attachment_arg(("a.txt", b"one"), ("b.txt", b"two"), ("c.txt", b"three")),
+    )
+
+    assert [a.name for a in FakeMessage.instances[0].attachments] == ["a.txt", "b.txt", "c.txt"]
+
+
+async def test_message_without_attachments_gets_none(tool, user_ok, fake_exchange):
+    await send(tool, user_ok)
+
+    assert getattr(FakeMessage.instances[0], "attachments", []) == []
+
+
+async def test_success_block_lists_attachments_without_their_content(tool, user_ok, fake_exchange):
+    secret = b"top-secret-file-content"
+    encoded = base64.b64encode(secret).decode()
+
+    result = await send(tool, user_ok, attachments=attachment_arg(("notes.txt", secret)))
+
+    assert "notes.txt" in result
+    assert "text/plain" in result
+    assert f"{len(secret)} B" in result
+    assert encoded not in result
+    assert "top-secret-file-content" not in result
+
+
+async def test_dry_run_lists_attachments_without_their_content(tool, user_ok, fake_exchange):
+    tool.valves.dry_run = True
+    encoded = base64.b64encode(b"hello").decode()
+
+    result = await send(tool, user_ok, attachments=attachment_arg(("notes.txt", b"hello")))
+
+    assert result.startswith(m.BANNER_DRY_RUN)
+    assert "notes.txt" in result
+    assert encoded not in result
+    assert FakeAccount.instances == []
+
+
+async def test_confirmation_dialog_shows_attachments(tool, user_ok, fake_exchange, confirming_call):
+    tool.valves.require_confirmation = True
+
+    await send(tool, user_ok, attachments=attachment_arg(("notes.txt", b"hello")), __event_call__=confirming_call)
+
+    message = confirming_call.calls[0]["data"]["message"]
+    assert "Anhänge:" in message
+    assert "notes.txt" in message
+    assert base64.b64encode(b"hello").decode() not in message
+
+
+async def test_attachments_can_be_disabled_by_the_administrator(tool, user_ok, fake_exchange):
+    tool.valves.allow_attachments = False
+
+    result = await send(tool, user_ok, attachments=attachment_arg())
+
+    assert result.startswith(m.BANNER_NOT_SENT)
+    assert "disabled by the administrator" in result
+    assert FakeAccount.instances == []
+
+
+async def test_disabling_attachments_does_not_block_plain_messages(tool, user_ok, fake_exchange):
+    tool.valves.allow_attachments = False
+
+    result = await send(tool, user_ok)
+
+    assert result.startswith(m.BANNER_SENT)
+
+
+@pytest.mark.parametrize(
+    ("overrides", "expected"),
+    [
+        ({"attachments": "[{filename: nope}"}, "not valid JSON"),
+        ({"attachments": '[{"filename": "a.txt", "content_base64": "!!!not base64!!!"}]'}, "not valid base64"),
+        ({"attachments": '[{"filename": "a.txt"}]'}, "no base64 content"),
+    ],
+)
+async def test_unusable_attachments_are_rejected(tool, user_ok, fake_exchange, overrides, expected):
+    result = await send(tool, user_ok, **overrides)
+
+    assert result.startswith(m.BANNER_NOT_SENT)
+    assert expected in result
+    assert FakeAccount.instances == []
+
+
+async def test_too_many_attachments_rejects_the_whole_message(tool, user_ok, fake_exchange):
+    tool.valves.max_attachments = 2
+    payload = attachment_arg(("a.txt", b"a"), ("b.txt", b"b"), ("c.txt", b"c"))
+
+    result = await send(tool, user_ok, attachments=payload)
+
+    assert result.startswith(m.BANNER_NOT_SENT)
+    assert "exceeds the configured limit of 2" in result
+    assert FakeAccount.instances == []
+
+
+async def test_oversized_attachment_rejects_the_whole_message(tool, user_ok, fake_exchange):
+    tool.valves.max_attachment_size_mb = 1
+
+    result = await send(tool, user_ok, attachments=attachment_arg(("big.bin", b"x" * (2 * m.BYTES_PER_MB))))
+
+    assert result.startswith(m.BANNER_NOT_SENT)
+    assert "per-file limit" in result
+    assert FakeAccount.instances == []
+
+
+async def test_blocked_extension_rejects_the_whole_message(tool, user_ok, fake_exchange):
+    result = await send(tool, user_ok, attachments=attachment_arg(("payload.exe", b"MZ")))
+
+    assert result.startswith(m.BANNER_NOT_SENT)
+    assert "blocked file extension" in result
+    assert FakeAccount.instances == []
+
+
+async def test_sanitized_filename_is_reported_and_used(tool, user_ok, fake_exchange):
+    result = await send(tool, user_ok, attachments=attachment_arg(("../../etc/passwd", b"root:x:0:0")))
+
+    assert result.startswith(m.BANNER_SENT)
+    assert FakeMessage.instances[0].attachments[0].name == "passwd"
+    assert "Note:" in result
+
+
+async def test_status_events_terminate_once_with_attachments(tool, user_ok, fake_exchange, recording_emitter):
+    tool.valves.emit_status = True
+
+    await send(tool, user_ok, attachments=attachment_arg(), __event_emitter__=recording_emitter)
+
+    done_events = [e for e in recording_emitter.events if e["data"]["done"]]
+    assert len(done_events) == 1
+
+
+async def test_status_events_terminate_once_when_an_attachment_is_rejected(
+    tool, user_ok, fake_exchange, recording_emitter
+):
+    tool.valves.emit_status = True
+
+    await send(tool, user_ok, attachments="not json", __event_emitter__=recording_emitter)
+
+    done_events = [e for e in recording_emitter.events if e["data"]["done"]]
+    assert len(done_events) == 1
+
+
+# --------------------------------------------------------------------------
 # Password never leaks
 # --------------------------------------------------------------------------
 
@@ -454,6 +632,8 @@ async def test_password_never_appears_in_output(tool, user_ok, fake_exchange, re
 
     outputs.append(await send(tool, user_ok, to="", __event_emitter__=recording_emitter))
 
+    outputs.append(await send(tool, user_ok, attachments=attachment_arg(), __event_emitter__=recording_emitter))
+
     FakeMessage.raise_on_send = RuntimeError(f"auth blew up with {PASSWORD}")
     outputs.append(await send(tool, user_ok, __event_emitter__=recording_emitter))
 
@@ -461,6 +641,24 @@ async def test_password_never_appears_in_output(tool, user_ok, fake_exchange, re
         assert PASSWORD not in output
     for event in recording_emitter.events:
         assert PASSWORD not in event["data"]["description"]
+
+
+async def test_attachment_content_never_appears_in_output(tool, user_ok, fake_exchange, recording_emitter):
+    tool.valves.emit_status = True
+    content = b"confidential-payroll-data"
+    encoded = base64.b64encode(content).decode()
+    payload = attachment_arg(("payroll.txt", content))
+
+    outputs = [await send(tool, user_ok, attachments=payload, __event_emitter__=recording_emitter)]
+
+    tool.valves.dry_run = True
+    outputs.append(await send(tool, user_ok, attachments=payload, __event_emitter__=recording_emitter))
+
+    for output in outputs:
+        assert encoded not in output
+        assert content.decode() not in output
+    for event in recording_emitter.events:
+        assert encoded not in event["data"]["description"]
 
 
 # --------------------------------------------------------------------------
@@ -512,3 +710,22 @@ async def test_dry_run_still_works_without_exchangelib(module_without_exchangeli
     result = await tool.send_email(to="bob@example.com", subject="s", body="b", __user__=user)
 
     assert result.startswith(module_without_exchangelib.BANNER_DRY_RUN)
+
+
+async def test_dry_run_with_attachments_works_without_exchangelib(module_without_exchangelib, user_ok):
+    """FileAttachment is None here - the dry run must never reach it."""
+    tool = module_without_exchangelib.Tools()
+    tool.valves.dry_run = True
+    tool.valves.emit_status = False
+    user = dict(user_ok)
+    user["valves"] = module_without_exchangelib.Tools.UserValves(
+        username="EXAMPLE\\alice", email_address="alice@example.com", password=PASSWORD
+    )
+
+    assert module_without_exchangelib.FileAttachment is None
+    result = await tool.send_email(
+        to="bob@example.com", subject="s", body="b", attachments=attachment_arg(), __user__=user
+    )
+
+    assert result.startswith(module_without_exchangelib.BANNER_DRY_RUN)
+    assert "notes.txt" in result
