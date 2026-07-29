@@ -766,8 +766,6 @@ class Tools:
         """
         Send an email from the user's own Exchange mailbox.
 
-        The user is asked to confirm before the message is actually sent.
-
         :param to: Recipient email addresses separated by commas. At least one is required.
         :param subject: Subject line of the email. Must not be empty.
         :param body: Message body. Plain text by default, or HTML when body_is_html is true.
@@ -900,14 +898,14 @@ class Tools:
                 bcc_note = f"\nBcc: {len(bcc_list)} recipient(s)" if bcc_list else ""
                 confirmed = await request_confirmation(
                     __event_call__,
-                    "Send this email?",
-                    f"From: {sender}\n"
-                    f"To: {_format_addresses(to_list)}\n"
+                    "Wollen Sie diese E-Mail wirklich versenden?",
+                    f"Von: {sender}\n"
+                    f"An: {_format_addresses(to_list)}\n"
                     f"Cc: {_format_addresses(cc_list)}"
                     f"{bcc_note}\n"
-                    f"Subject: {clean_subject}\n"
-                    f"Format: {'HTML' if is_html else 'plain text'}\n\n"
-                    "Send it now?",
+                    f"Betreff: {clean_subject}\n"
+                    f"Format: {'HTML' if is_html else 'Reiner Text'}\n\n\n"
+                    "Jetzt senden?",
                 )
                 if not confirmed:
                     await status("Cancelled - no email was sent.", done=True)
