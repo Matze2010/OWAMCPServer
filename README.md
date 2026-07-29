@@ -166,6 +166,8 @@ als **base64**-String:
 - Dateinamen werden auf den reinen Namen reduziert: Pfadangaben wie `../../etc/passwd` werden zu
   `passwd`, Steuerzeichen entfernt, überlange Namen gekürzt. Jede Änderung erscheint als Hinweis
   im Ergebnis.
+- In den Ausgabeblöcken erscheinen Anhänge **nur als Anzahl und Gesamtgröße**
+  (`Attachments: 2 file(s), 970 B`), nicht mit Dateinamen.
 - **Ganze Nachricht oder gar nichts:** Ist ein Anhang unbrauchbar, zu groß, zu zahlreich oder hat
   eine gesperrte Endung, wird die komplette Nachricht abgelehnt. Eine Mail ohne den Anhang zu
   senden, den der Nutzer angehängt haben wollte, wäre schlimmer als ein klarer Fehler.
@@ -213,7 +215,7 @@ The following message WOULD have been sent:
 From:       alice@example.com
 To:         bob@example.com
 ...
-Attachments: bericht.pdf (960 B, application/pdf), notiz.txt (10 B, text/plain)
+Attachments: 2 file(s), 970 B
 ...
 DRY RUN - NO EMAIL WAS SENT. Disable the 'dry_run' valve to send for real.
 ```
@@ -251,9 +253,11 @@ Wichtig zu wissen:
   bereits im Tool statt erst auf dem Exchange-Server; Dateinamen werden auf einen reinen Namen ohne
   Pfad und Steuerzeichen reduziert. Der Inhalt selbst wird **nicht** inspiziert — ein
   Virenscanner auf dem Mailserver bleibt notwendig.
-- **Anhangsinhalte erscheinen nie im Chat.** Ausgegeben werden ausschließlich Dateiname, Größe und
-  Content-Type; der base64-String wird weder in Erfolgsmeldung noch Trockenlauf, Bestätigung oder
-  Fehlermeldung zurückgeschrieben.
+- **Anhangsinhalte erscheinen nie im Chat.** Der base64-String wird weder in Erfolgsmeldung noch
+  Trockenlauf, Bestätigung oder Fehlermeldung zurückgeschrieben.
+- **Anhänge werden nur als Anzahl gemeldet** — `Attachments: 2 file(s), 970 B` —, analog zur
+  Bcc-Behandlung im Erfolgsblock. Dateinamen erscheinen ausschließlich dort, wo sie zum Handeln
+  nötig sind: in Fehlermeldungen und in Hinweisen zu bereinigten Dateinamen.
 
 ## Fehlerbehebung
 
@@ -284,7 +288,7 @@ durch aufzeichnende Doubles ersetzt.
 
 ```bash
 uv sync --group dev
-uv run pytest          # 231 Tests
+uv run pytest          # 232 Tests
 uv run ruff check .
 uv run ruff format --check .
 ```

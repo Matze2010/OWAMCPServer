@@ -568,10 +568,16 @@ def build_attachments(specs: list[dict[str, str]], valves: Any) -> tuple[list[di
 
 
 def format_attachments(attachments: list[dict[str, Any]]) -> str:
-    """Render attachments as one line. Deliberately never touches the bytes."""
+    """Summarise attachments by count and total size, like the Bcc line does.
+
+    Filenames are deliberately left out of the routine listing. They do still
+    appear in notes and error messages, where naming the offending file is what
+    makes the message actionable.
+    """
     if not attachments:
         return "(none)"
-    return ", ".join(f"{a['filename']} ({format_size(a['size'])}, {a['content_type']})" for a in attachments)
+    total = sum(a["size"] for a in attachments)
+    return f"{len(attachments)} file(s), {format_size(total)}"
 
 
 def build_version(build_string: str) -> Any:
@@ -1215,7 +1221,12 @@ class Tools:
                     )
                 await status("Waiting for your confirmation…")
                 bcc_note = f"\nBcc: {len(bcc_list)} recipient(s)" if bcc_list else ""
-                attachment_note = f"\nAnhänge: {format_attachments(attachment_items)}" if attachment_items else ""
+                attachment_note = (
+                    f"\nAnhänge: {len(attachment_items)} Datei(en), "
+                    f"{format_size(sum(a['size'] for a in attachment_items))}"
+                    if attachment_items
+                    else ""
+                )
                 confirmed = await request_confirmation(
                     __event_call__,
                     "Wollen Sie diese E-Mail wirklich versenden?",

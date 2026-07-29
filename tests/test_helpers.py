@@ -501,12 +501,16 @@ def test_format_size(num_bytes, expected):
     assert m.format_size(num_bytes) == expected
 
 
-def test_format_attachments_never_shows_content():
+def test_format_attachments_reports_count_and_total_size_only():
     rendered = m.format_attachments(
-        [{"filename": "a.txt", "content": b"secret-bytes", "content_type": "text/plain", "size": 12}]
+        [
+            {"filename": "a.txt", "content": b"secret-bytes", "content_type": "text/plain", "size": 12},
+            {"filename": "b.txt", "content": b"more", "content_type": "text/plain", "size": 4},
+        ]
     )
-    assert rendered == "a.txt (12 B, text/plain)"
+    assert rendered == "2 file(s), 16 B"
     assert "secret-bytes" not in rendered
+    assert "a.txt" not in rendered
 
 
 def test_format_attachments_without_attachments():

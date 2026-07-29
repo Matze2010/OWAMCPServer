@@ -485,39 +485,50 @@ async def test_message_without_attachments_gets_none(tool, user_ok, fake_exchang
     assert getattr(FakeMessage.instances[0], "attachments", []) == []
 
 
-async def test_success_block_lists_attachments_without_their_content(tool, user_ok, fake_exchange):
+async def test_success_block_reports_attachments_as_a_count(tool, user_ok, fake_exchange):
     secret = b"top-secret-file-content"
     encoded = base64.b64encode(secret).decode()
 
-    result = await send(tool, user_ok, attachments=attachment_arg(("notes.txt", secret)))
+    result = await send(tool, user_ok, attachments=attachment_arg(("notes.txt", secret), ("more.txt", b"x")))
 
-    assert "notes.txt" in result
-    assert "text/plain" in result
-    assert f"{len(secret)} B" in result
+    assert f"Attachments: 2 file(s), {m.format_size(len(secret) + 1)}" in result
+    assert "notes.txt" not in result
     assert encoded not in result
     assert "top-secret-file-content" not in result
 
 
-async def test_dry_run_lists_attachments_without_their_content(tool, user_ok, fake_exchange):
+async def test_success_block_says_none_without_attachments(tool, user_ok, fake_exchange):
+    result = await send(tool, user_ok)
+
+    assert "Attachments: (none)" in result
+
+
+async def test_dry_run_reports_attachments_as_a_count(tool, user_ok, fake_exchange):
     tool.valves.dry_run = True
     encoded = base64.b64encode(b"hello").decode()
 
     result = await send(tool, user_ok, attachments=attachment_arg(("notes.txt", b"hello")))
 
     assert result.startswith(m.BANNER_DRY_RUN)
-    assert "notes.txt" in result
+    assert "Attachments: 1 file(s), 5 B" in result
+    assert "notes.txt" not in result
     assert encoded not in result
     assert FakeAccount.instances == []
 
 
-async def test_confirmation_dialog_shows_attachments(tool, user_ok, fake_exchange, confirming_call):
+async def test_confirmation_dialog_reports_attachments_as_a_count(tool, user_ok, fake_exchange, confirming_call):
     tool.valves.require_confirmation = True
 
-    await send(tool, user_ok, attachments=attachment_arg(("notes.txt", b"hello")), __event_call__=confirming_call)
+    await send(
+        tool,
+        user_ok,
+        attachments=attachment_arg(("notes.txt", b"hello"), ("b.txt", b"hi")),
+        __event_call__=confirming_call,
+    )
 
     message = confirming_call.calls[0]["data"]["message"]
-    assert "Anhänge:" in message
-    assert "notes.txt" in message
+    assert "Anhänge: 2 Datei(en), 7 B" in message
+    assert "notes.txt" not in message
     assert base64.b64encode(b"hello").decode() not in message
 
 
@@ -728,4 +739,4 @@ async def test_dry_run_with_attachments_works_without_exchangelib(module_without
     )
 
     assert result.startswith(module_without_exchangelib.BANNER_DRY_RUN)
-    assert "notes.txt" in result
+    assert "Attachments: 1 file(s), 5 B" in result
