@@ -1,0 +1,33 @@
+[project]
+name = "owa-exchange-email-tool"
+version = "1.0.0"
+description = "Open WebUI workspace tool for sending email through an on-premises Exchange server via EWS"
+requires-python = ">=3.11"
+# No runtime dependencies here on purpose: Open WebUI installs the tool's
+# requirements from the `requirements:` frontmatter of exchange_email_tool.py.
+# This project file exists only for local development and testing.
+dependencies = []
+
+[dependency-groups]
+dev = [
+    "exchangelib>=5.4,<6",
+    "pydantic>=2.7",
+    "pytest>=8",
+    "pytest-asyncio>=0.24",
+    "ruff>=0.6",
+]
+
+[tool.uv]
+package = false
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B"]
