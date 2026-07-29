@@ -734,8 +734,12 @@ class Tools:
         )
         password: str = Field(
             default="",
-            description="Your Exchange password. Open WebUI stores valve values in its database, so treat this "
-            "as stored in clear text and pick an account accordingly.",
+            description="Your Exchange password. The input is masked, but Open WebUI stores valve values in its "
+            "database, so treat this as stored in clear text and pick an account accordingly.",
+            # Open WebUI renders this with its SensitiveInput component. Masking
+            # is display-only - it protects against shoulder surfing, not
+            # against anyone who can read the database.
+            json_schema_extra={"input": {"type": "password"}},
         )
         signature: str = Field(
             default="",

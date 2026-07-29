@@ -261,6 +261,31 @@ def test_resolve_user_valves_from_unusable_value():
 
 
 # --------------------------------------------------------------------------
+# Valve schema as Open WebUI reads it
+# --------------------------------------------------------------------------
+
+
+def test_password_valve_is_declared_as_a_password_input():
+    """Open WebUI checks properties[field].input.type == 'password' to render
+    its masked SensitiveInput, so the hint must survive in the JSON schema."""
+    schema = m.Tools.UserValves.model_json_schema()
+    assert schema["properties"]["password"]["input"] == {"type": "password"}
+
+
+def test_only_the_password_valve_is_masked():
+    for model in (m.Tools.Valves, m.Tools.UserValves):
+        for name, spec in model.model_json_schema()["properties"].items():
+            if name != "password":
+                assert "input" not in spec, name
+
+
+def test_every_valve_has_a_description_for_the_admin_ui():
+    for model in (m.Tools.Valves, m.Tools.UserValves):
+        for name, spec in model.model_json_schema()["properties"].items():
+            assert spec.get("description"), name
+
+
+# --------------------------------------------------------------------------
 # append_signature
 # --------------------------------------------------------------------------
 

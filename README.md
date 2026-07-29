@@ -99,13 +99,17 @@ Zu finden im Chat unter **Controls → Valves** bzw. in den persönlichen Tool-E
 | `enabled` | `Ja` | Persönlicher Schalter: Darf das Tool in meinem Namen senden? |
 | `username` | – | Exchange-Anmeldename, meist `DOMAIN\benutzername` (**einfacher** Backslash). |
 | `email_address` | – | Eigene primäre SMTP-Adresse — das Absenderpostfach. |
-| `password` | – | Exchange-Passwort. |
+| `password` | – | Exchange-Passwort. Wird als maskiertes Eingabefeld dargestellt. |
 | `signature` | – | Optionale Klartext-Signatur, wird an jede Mail angehängt. |
 
 ### 🔒 Sicherheitshinweis zum Passwort
 
-Open WebUI speichert Valve-Werte als JSON in seiner Datenbank. Es gibt **keinen** gesonderten
-Secret-Feldtyp — das Passwort ist als **im Klartext gespeichert** zu betrachten. Entsprechend
+Das Passwortfeld ist über `json_schema_extra={"input": {"type": "password"}}` als Passwort-Eingabe
+deklariert; Open WebUI rendert es dadurch maskiert (`SensitiveInput`) statt als offenes Textfeld.
+
+**Diese Maskierung ist reine Anzeige.** Sie schützt gegen Mitlesen über die Schulter, nicht gegen
+Zugriff auf die Datenbank: Open WebUI speichert Valve-Werte als JSON und verschlüsselt sie nicht.
+Das Passwort ist deshalb weiterhin als **im Klartext gespeichert** zu betrachten. Entsprechend
 sollte bewusst entschieden werden, welches Konto hier hinterlegt wird und wer Zugriff auf die
 Open-WebUI-Datenbank hat.
 
