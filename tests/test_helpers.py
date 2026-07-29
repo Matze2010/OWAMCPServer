@@ -513,6 +513,17 @@ def test_format_attachments_reports_count_and_total_size_only():
     assert "a.txt" not in rendered
 
 
+def test_format_attachment_names_lists_names_and_sizes_for_the_dialog():
+    rendered = m.format_attachment_names(
+        [
+            {"filename": "a.txt", "content": b"secret-bytes", "content_type": "text/plain", "size": 12},
+            {"filename": "b.txt", "content": b"more", "content_type": "text/plain", "size": 4},
+        ]
+    )
+    assert rendered == "a.txt (12 B), b.txt (4 B)"
+    assert "secret-bytes" not in rendered
+
+
 def test_format_attachments_without_attachments():
     assert m.format_attachments([]) == "(none)"
 

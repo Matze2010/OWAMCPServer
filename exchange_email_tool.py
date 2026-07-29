@@ -570,14 +570,26 @@ def build_attachments(specs: list[dict[str, str]], valves: Any) -> tuple[list[di
 def format_attachments(attachments: list[dict[str, Any]]) -> str:
     """Summarise attachments by count and total size, like the Bcc line does.
 
-    Filenames are deliberately left out of the routine listing. They do still
-    appear in notes and error messages, where naming the offending file is what
-    makes the message actionable.
+    Filenames are deliberately left out of the result blocks, which end up in
+    the chat transcript. They do still appear in notes and error messages, where
+    naming the offending file is what makes the message actionable - and in the
+    confirmation dialog, see format_attachment_names.
     """
     if not attachments:
         return "(none)"
     total = sum(a["size"] for a in attachments)
     return f"{len(attachments)} file(s), {format_size(total)}"
+
+
+def format_attachment_names(attachments: list[dict[str, Any]]) -> str:
+    """List attachments by name and size for the confirmation dialog.
+
+    The dialog is the one place where naming the files is worth it: it is the
+    guard against a manipulated model context, and deciding whether to send
+    means knowing *which* file goes out. Nothing has been delivered or written
+    to the transcript at this point.
+    """
+    return ", ".join(f"{a['filename']} ({format_size(a['size'])})" for a in attachments)
 
 
 def build_version(build_string: str) -> Any:
@@ -1221,12 +1233,7 @@ class Tools:
                     )
                 await status("Waiting for your confirmation…")
                 bcc_note = f"\nBcc: {len(bcc_list)} recipient(s)" if bcc_list else ""
-                attachment_note = (
-                    f"\nAnhänge: {len(attachment_items)} Datei(en), "
-                    f"{format_size(sum(a['size'] for a in attachment_items))}"
-                    if attachment_items
-                    else ""
-                )
+                attachment_note = f"\nAnhänge: {format_attachment_names(attachment_items)}" if attachment_items else ""
                 confirmed = await request_confirmation(
                     __event_call__,
                     "Wollen Sie diese E-Mail wirklich versenden?",

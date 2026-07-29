@@ -516,7 +516,8 @@ async def test_dry_run_reports_attachments_as_a_count(tool, user_ok, fake_exchan
     assert FakeAccount.instances == []
 
 
-async def test_confirmation_dialog_reports_attachments_as_a_count(tool, user_ok, fake_exchange, confirming_call):
+async def test_confirmation_dialog_names_the_attachments(tool, user_ok, fake_exchange, confirming_call):
+    """The dialog is the guard against a manipulated context - it must name the files."""
     tool.valves.require_confirmation = True
 
     await send(
@@ -527,9 +528,18 @@ async def test_confirmation_dialog_reports_attachments_as_a_count(tool, user_ok,
     )
 
     message = confirming_call.calls[0]["data"]["message"]
-    assert "Anhänge: 2 Datei(en), 7 B" in message
-    assert "notes.txt" not in message
+    assert "Anhänge: notes.txt (5 B), b.txt (2 B)" in message
     assert base64.b64encode(b"hello").decode() not in message
+
+
+async def test_confirmation_dialog_omits_the_attachment_line_when_there_are_none(
+    tool, user_ok, fake_exchange, confirming_call
+):
+    tool.valves.require_confirmation = True
+
+    await send(tool, user_ok, __event_call__=confirming_call)
+
+    assert "Anhänge" not in confirming_call.calls[0]["data"]["message"]
 
 
 async def test_attachments_can_be_disabled_by_the_administrator(tool, user_ok, fake_exchange):

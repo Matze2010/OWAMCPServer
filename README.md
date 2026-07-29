@@ -167,7 +167,8 @@ als **base64**-String:
   `passwd`, Steuerzeichen entfernt, überlange Namen gekürzt. Jede Änderung erscheint als Hinweis
   im Ergebnis.
 - In den Ausgabeblöcken erscheinen Anhänge **nur als Anzahl und Gesamtgröße**
-  (`Attachments: 2 file(s), 970 B`), nicht mit Dateinamen.
+  (`Attachments: 2 file(s), 970 B`), nicht mit Dateinamen. Der Bestätigungsdialog nennt sie
+  dagegen einzeln — dort ist die Frage ja gerade, ob *diese* Dateien rausgehen sollen.
 - **Ganze Nachricht oder gar nichts:** Ist ein Anhang unbrauchbar, zu groß, zu zahlreich oder hat
   eine gesperrte Endung, wird die komplette Nachricht abgelehnt. Eine Mail ohne den Anhang zu
   senden, den der Nutzer angehängt haben wollte, wäre schlimmer als ein klarer Fehler.
@@ -181,8 +182,9 @@ als **base64**-String:
 ## Bestätigung vor dem Versand
 
 Solange `require_confirmation` aktiv ist, erscheint vor jedem echten Versand ein Dialog mit
-Absender, Empfängern (Bcc als Anzahl), Betreff und Format. Erst nach ausdrücklicher Bestätigung
-baut das Tool überhaupt eine Verbindung zum Exchange-Server auf.
+Absender, Empfängern (Bcc als Anzahl), Betreff, Format und — falls vorhanden — den **Anhängen mit
+Name und Größe**. Erst nach ausdrücklicher Bestätigung baut das Tool überhaupt eine Verbindung zum
+Exchange-Server auf.
 
 Das Verhalten ist bewusst **fail-closed**:
 
@@ -255,9 +257,14 @@ Wichtig zu wissen:
   Virenscanner auf dem Mailserver bleibt notwendig.
 - **Anhangsinhalte erscheinen nie im Chat.** Der base64-String wird weder in Erfolgsmeldung noch
   Trockenlauf, Bestätigung oder Fehlermeldung zurückgeschrieben.
-- **Anhänge werden nur als Anzahl gemeldet** — `Attachments: 2 file(s), 970 B` —, analog zur
-  Bcc-Behandlung im Erfolgsblock. Dateinamen erscheinen ausschließlich dort, wo sie zum Handeln
-  nötig sind: in Fehlermeldungen und in Hinweisen zu bereinigten Dateinamen.
+- **In Erfolgsmeldung und Trockenlauf werden Anhänge nur als Anzahl gemeldet** —
+  `Attachments: 2 file(s), 970 B` —, analog zur Bcc-Behandlung im Erfolgsblock.
+- **Der Bestätigungsdialog nennt die Dateien einzeln** (`Anhänge: bericht.pdf (960 B),
+  notiz.txt (10 B)`). Er ist der Schutzmechanismus gegen einen manipulierten Modellkontext, und
+  dafür muss erkennbar sein, *welche* Datei mitgeht. Zu diesem Zeitpunkt ist nichts zugestellt und
+  nichts ins Chat-Protokoll geschrieben.
+- Darüber hinaus erscheinen Dateinamen dort, wo sie zum Handeln nötig sind: in Fehlermeldungen und
+  in Hinweisen zu bereinigten Dateinamen.
 
 ## Fehlerbehebung
 
@@ -288,7 +295,7 @@ durch aufzeichnende Doubles ersetzt.
 
 ```bash
 uv sync --group dev
-uv run pytest          # 232 Tests
+uv run pytest          # 234 Tests
 uv run ruff check .
 uv run ruff format --check .
 ```
