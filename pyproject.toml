@@ -10,7 +10,7 @@ dependencies = []
 
 [dependency-groups]
 dev = [
-    "exchangelib>=5.4,<6",
+    "exchangelib>=5.4",
     "pydantic>=2.7",
     "pytest>=8",
     "pytest-asyncio>=0.24",
