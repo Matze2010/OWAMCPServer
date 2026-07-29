@@ -5,7 +5,7 @@ author_url: https://github.com/Matze2010/OWAMCPServer
 funding_url: https://github.com/Matze2010/OWAMCPServer
 version: 1.0.0
 license: MIT
-requirements: exchangelib>=5.4,<6
+requirements: exchangelib>=5.4
 description: Send email via an on-premises Exchange server (EWS), using each user's own mailbox credentials.
 """
 
@@ -621,7 +621,7 @@ def dry_run_block(spec: dict[str, Any], valves: Any, endpoint_label: str, notes:
 def missing_library_message() -> str:
     return failure_block(
         "the Python library 'exchangelib' is not available, so no connection to Exchange can be made.",
-        "An administrator should verify that 'requirements: exchangelib>=5.4,<6' is present in the tool header "
+        "An administrator should verify that 'requirements: exchangelib>=5.4' is present in the tool header "
         f"and that Open WebUI was able to install it. Details: {EXCHANGELIB_IMPORT_ERROR or 'unknown import error'}",
     )
 
@@ -997,7 +997,7 @@ class Tools:
                 return redact(
                     "CONNECTION CHECK FAILED\n"
                     "The Python library 'exchangelib' is not available. An administrator should verify that "
-                    "'requirements: exchangelib>=5.4,<6' is present in the tool header and that Open WebUI was "
+                    "'requirements: exchangelib>=5.4' is present in the tool header and that Open WebUI was "
                     f"able to install it. Details: {EXCHANGELIB_IMPORT_ERROR or 'unknown import error'}",
                     secrets,
                 )
