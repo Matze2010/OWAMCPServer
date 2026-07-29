@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import base64
+import json
+
 import pytest
 
 import exchange_email_tool as m
@@ -325,3 +328,271 @@ def test_describe_error_prefers_specific_over_transport():
 
 def test_describe_error_falls_back_for_unknown_exception():
     assert "unexpected" in m.describe_error(RuntimeError("boom")).lower()
+
+
+# --------------------------------------------------------------------------
+# parse_attachments
+# --------------------------------------------------------------------------
+
+HELLO_B64 = base64.b64encode(b"hello").decode()
+
+
+@pytest.mark.parametrize("raw", ["", "   ", None, "[]"])
+def test_parse_attachments_empty(raw):
+    assert m.parse_attachments(raw) == []
+
+
+def test_parse_attachments_reads_a_json_array():
+    specs = m.parse_attachments(json.dumps([{"filename": "a.txt", "content_base64": HELLO_B64}]))
+    assert specs == [{"filename": "a.txt", "content_base64": HELLO_B64, "content_type": ""}]
+
+
+def test_parse_attachments_accepts_a_single_object():
+    specs = m.parse_attachments(json.dumps({"filename": "a.txt", "content_base64": HELLO_B64}))
+    assert len(specs) == 1
+    assert specs[0]["filename"] == "a.txt"
+
+
+def test_parse_attachments_accepts_an_already_decoded_list():
+    specs = m.parse_attachments([{"filename": "a.txt", "content_base64": HELLO_B64}])
+    assert specs[0]["content_base64"] == HELLO_B64
+
+
+@pytest.mark.parametrize(
+    ("payload", "expected_type"),
+    [
+        ({"name": "a.txt", "content": HELLO_B64, "type": "text/plain"}, "text/plain"),
+        ({"file_name": "a.txt", "data": HELLO_B64, "mime_type": "text/plain"}, "text/plain"),
+        ({"FileName": "a.txt", "Base64": HELLO_B64, "MimeType": "text/plain"}, "text/plain"),
+    ],
+)
+def test_parse_attachments_understands_key_aliases(payload, expected_type):
+    specs = m.parse_attachments([payload])
+    assert specs[0] == {"filename": "a.txt", "content_base64": HELLO_B64, "content_type": expected_type}
+
+
+def test_parse_attachments_rejects_broken_json():
+    with pytest.raises(m.AttachmentError, match="not valid JSON"):
+        m.parse_attachments("[{filename: a.txt}")
+
+
+def test_parse_attachments_rejects_a_bare_scalar():
+    with pytest.raises(m.AttachmentError):
+        m.parse_attachments("42")
+
+
+def test_parse_attachments_rejects_non_objects_in_the_array():
+    with pytest.raises(m.AttachmentError, match="attachment 1"):
+        m.parse_attachments('["a.txt"]')
+
+
+def test_parse_attachments_requires_content():
+    with pytest.raises(m.AttachmentError, match="no base64 content"):
+        m.parse_attachments([{"filename": "a.txt"}])
+
+
+# --------------------------------------------------------------------------
+# decode_attachment_content
+# --------------------------------------------------------------------------
+
+
+def test_decode_attachment_content_plain():
+    assert m.decode_attachment_content(HELLO_B64, "a.txt") == (b"hello", "")
+
+
+def test_decode_attachment_content_ignores_whitespace_and_newlines():
+    wrapped = "  aGVs\nbG8=  \t"
+    assert m.decode_attachment_content(wrapped, "a.txt") == (b"hello", "")
+
+
+def test_decode_attachment_content_strips_a_data_uri_and_keeps_its_type():
+    content, hint = m.decode_attachment_content(f"data:text/plain;base64,{HELLO_B64}", "a.txt")
+    assert content == b"hello"
+    assert hint == "text/plain"
+
+
+def test_decode_attachment_content_accepts_the_url_safe_alphabet():
+    raw = base64.urlsafe_b64encode(b"\xfb\xef\xbe").decode()
+    assert "-" in raw or "_" in raw
+    assert m.decode_attachment_content(raw, "a.bin")[0] == b"\xfb\xef\xbe"
+
+
+def test_decode_attachment_content_restores_missing_padding():
+    assert m.decode_attachment_content(HELLO_B64.rstrip("="), "a.txt")[0] == b"hello"
+
+
+@pytest.mark.parametrize("raw", ["not base64 at all!", "****", "a==="])
+def test_decode_attachment_content_rejects_unusable_input(raw):
+    with pytest.raises(m.AttachmentError, match="not valid base64"):
+        m.decode_attachment_content(raw, "a.txt")
+
+
+@pytest.mark.parametrize("raw", ["", "   ", None, "data:text/plain;base64,"])
+def test_decode_attachment_content_rejects_missing_content(raw):
+    with pytest.raises(m.AttachmentError, match="no base64 content"):
+        m.decode_attachment_content(raw, "a.txt")
+
+
+def test_decode_attachment_content_rejects_a_truncated_string():
+    # 5 characters can never be padded to a whole number of base64 quanta.
+    with pytest.raises(m.AttachmentError, match="truncated"):
+        m.decode_attachment_content("aGVsb", "a.txt")
+
+
+# --------------------------------------------------------------------------
+# sanitize_filename / resolve_content_type / format_size
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("report.pdf", "report.pdf"),
+        ("../../etc/passwd", "passwd"),
+        ("C:\\temp\\notes.txt", "notes.txt"),
+        ("/absolute/path/x.png", "x.png"),
+        ('"quoted.txt"', "quoted.txt"),
+        ("bad\nname.txt", "badname.txt"),
+    ],
+)
+def test_sanitize_filename(raw, expected):
+    assert m.sanitize_filename(raw, 1)[0] == expected
+
+
+def test_sanitize_filename_notes_a_change():
+    name, note = m.sanitize_filename("../secret.txt", 2)
+    assert name == "secret.txt"
+    assert "attachment 2" in note
+
+
+@pytest.mark.parametrize("raw", ["", "   ", "/", "...", "\x00"])
+def test_sanitize_filename_generates_a_name_when_nothing_is_left(raw):
+    name, note = m.sanitize_filename(raw, 3)
+    assert name == "attachment-3"
+    assert note
+
+
+def test_sanitize_filename_shortens_and_keeps_the_extension():
+    name, note = m.sanitize_filename("x" * 400 + ".pdf", 1)
+    assert len(name) <= m.MAX_ATTACHMENT_FILENAME_LENGTH
+    assert name.endswith(".pdf")
+    assert "shortened" in note
+
+
+@pytest.mark.parametrize(
+    ("declared", "filename", "hint", "expected"),
+    [
+        ("application/pdf", "x.bin", "", "application/pdf"),
+        ("", "report.pdf", "", "application/pdf"),
+        ("", "x.bin", "image/png", "image/png"),
+        ("pdf", "x.unknownext", "", "application/octet-stream"),
+        ("", "x.unknownext", "", "application/octet-stream"),
+        ("APPLICATION/PDF", "x.bin", "", "application/pdf"),
+    ],
+)
+def test_resolve_content_type(declared, filename, hint, expected):
+    assert m.resolve_content_type(declared, filename, hint) == expected
+
+
+@pytest.mark.parametrize(
+    ("num_bytes", "expected"), [(0, "0 B"), (512, "512 B"), (2048, "2.0 KB"), (3 * 1024 * 1024, "3.0 MB")]
+)
+def test_format_size(num_bytes, expected):
+    assert m.format_size(num_bytes) == expected
+
+
+def test_format_attachments_reports_count_and_total_size_only():
+    rendered = m.format_attachments(
+        [
+            {"filename": "a.txt", "content": b"secret-bytes", "content_type": "text/plain", "size": 12},
+            {"filename": "b.txt", "content": b"more", "content_type": "text/plain", "size": 4},
+        ]
+    )
+    assert rendered == "2 file(s), 16 B"
+    assert "secret-bytes" not in rendered
+    assert "a.txt" not in rendered
+
+
+def test_format_attachment_names_lists_names_and_sizes_for_the_dialog():
+    rendered = m.format_attachment_names(
+        [
+            {"filename": "a.txt", "content": b"secret-bytes", "content_type": "text/plain", "size": 12},
+            {"filename": "b.txt", "content": b"more", "content_type": "text/plain", "size": 4},
+        ]
+    )
+    assert rendered == "a.txt (12 B), b.txt (4 B)"
+    assert "secret-bytes" not in rendered
+
+
+def test_format_attachments_without_attachments():
+    assert m.format_attachments([]) == "(none)"
+
+
+# --------------------------------------------------------------------------
+# build_attachments
+# --------------------------------------------------------------------------
+
+
+def test_build_attachments_decodes_and_describes():
+    items, notes = m.build_attachments(
+        [{"filename": "a.txt", "content_base64": HELLO_B64, "content_type": ""}], _valves()
+    )
+    assert notes == []
+    assert items == [{"filename": "a.txt", "content": b"hello", "content_type": "text/plain", "size": 5}]
+
+
+def test_build_attachments_is_a_noop_for_nothing():
+    assert m.build_attachments([], _valves()) == ([], [])
+
+
+def test_build_attachments_rejects_too_many():
+    specs = [{"filename": f"{i}.txt", "content_base64": HELLO_B64} for i in range(4)]
+    with pytest.raises(m.AttachmentError, match="exceeds the configured limit"):
+        m.build_attachments(specs, _valves(max_attachments=3))
+
+
+def test_build_attachments_rejects_an_oversized_file():
+    payload = base64.b64encode(b"x" * (2 * m.BYTES_PER_MB)).decode()
+    with pytest.raises(m.AttachmentError, match="per-file limit"):
+        m.build_attachments([{"filename": "big.bin", "content_base64": payload}], _valves(max_attachment_size_mb=1))
+
+
+def test_build_attachments_rejects_an_oversized_total():
+    payload = base64.b64encode(b"x" * m.BYTES_PER_MB).decode()
+    specs = [{"filename": f"{i}.bin", "content_base64": payload} for i in range(3)]
+    with pytest.raises(m.AttachmentError, match="combined limit"):
+        m.build_attachments(specs, _valves(max_attachment_size_mb=1, max_total_attachment_size_mb=2))
+
+
+@pytest.mark.parametrize("filename", ["payload.exe", "PAYLOAD.EXE", "setup.MSI"])
+def test_build_attachments_rejects_blocked_extensions(filename):
+    with pytest.raises(m.AttachmentError, match="blocked file extension"):
+        m.build_attachments([{"filename": filename, "content_base64": HELLO_B64}], _valves())
+
+
+def test_build_attachments_accepts_a_dotted_blocklist_entry():
+    with pytest.raises(m.AttachmentError, match="blocked file extension"):
+        m.build_attachments(
+            [{"filename": "notes.txt", "content_base64": HELLO_B64}],
+            _valves(blocked_attachment_extensions=".txt, .md"),
+        )
+
+
+def test_build_attachments_allows_everything_with_an_empty_blocklist():
+    items, _ = m.build_attachments(
+        [{"filename": "payload.exe", "content_base64": HELLO_B64}],
+        _valves(blocked_attachment_extensions=""),
+    )
+    assert items[0]["filename"] == "payload.exe"
+
+
+def test_build_attachments_notes_a_sanitized_filename():
+    items, notes = m.build_attachments([{"filename": "../../etc/passwd", "content_base64": HELLO_B64}], _valves())
+    assert items[0]["filename"] == "passwd"
+    assert any("passwd" in note for note in notes)
+
+
+def test_build_attachments_keeps_order():
+    specs = [{"filename": f"{i}.txt", "content_base64": HELLO_B64} for i in range(3)]
+    items, _ = m.build_attachments(specs, _valves())
+    assert [i["filename"] for i in items] == ["0.txt", "1.txt", "2.txt"]

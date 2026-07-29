@@ -3,17 +3,21 @@ title: Exchange E-Mail (EWS)
 author: Matze2010
 author_url: https://github.com/Matze2010/OWAMCPServer
 funding_url: https://github.com/Matze2010/OWAMCPServer
-version: 1.0.0
+version: 1.1.0
 license: MIT
 requirements: exchangelib>=5.4
-description: Send email via an on-premises Exchange server (EWS), using each user's own mailbox credentials.
+description: Send email, optionally with attachments, from the user's own on-premises Exchange mailbox (EWS).
 """
 
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import html as html_module
+import json
 import logging
+import mimetypes
 import re
 import threading
 from collections.abc import Awaitable, Callable
@@ -40,6 +44,7 @@ try:
         Build,
         Configuration,
         Credentials,
+        FileAttachment,
         HTMLBody,
         Message,
         Version,
@@ -55,7 +60,7 @@ try:
     EXCHANGELIB_IMPORT_ERROR = ""
 except Exception as exc:  # pragma: no cover - exercised via reload in tests
     Account = Build = Configuration = Credentials = HTMLBody = Message = Version = None
-    BaseProtocol = NoVerifyHTTPAdapter = DELEGATE = None
+    BaseProtocol = NoVerifyHTTPAdapter = DELEGATE = FileAttachment = None
     ews_errors = None
     EXCHANGELIB_AVAILABLE = False
     EXCHANGELIB_IMPORT_ERROR = f"{type(exc).__name__}: {exc}"
@@ -85,15 +90,31 @@ DANGLING_TAG_RE = re.compile(r"<\s*/?\s*(script|iframe|object|embed)\b[^>]*>", r
 EVENT_ATTR_RE = re.compile(r"""\son\w+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)""", re.I)
 JS_URL_RE = re.compile(r"""(href|src)\s*=\s*(["'])\s*javascript:[^"']*\2""", re.I)
 
+# 'data:image/png;base64,iVBOR…' - models like to paste the whole data URI.
+DATA_URI_RE = re.compile(r"^data:([^;,]*)(;[^,]*)?,", re.I)
+# Path separators and control characters are stripped from attachment names so a
+# filename can never escape into a path or smuggle newlines into the output.
+UNSAFE_FILENAME_RE = re.compile(r"[\x00-\x1f\x7f/\\]")
+
 MAX_EMAIL_LENGTH = 254
 BODY_PREVIEW_CHARS = 500
 REDACTION_MIN_SECRET_LENGTH = 4
+MAX_ATTACHMENT_FILENAME_LENGTH = 200
+BYTES_PER_MB = 1024 * 1024
+DEFAULT_ATTACHMENT_CONTENT_TYPE = "application/octet-stream"
+FALLBACK_ATTACHMENT_FILENAME = "attachment"
 
 BANNER_SENT = "EMAIL SENT SUCCESSFULLY"
 BANNER_DRY_RUN = "DRY RUN - NO EMAIL WAS SENT"
 BANNER_NOT_SENT = "EMAIL NOT SENT"
 
 IMPORTANCE_CHOICES = {"low": "Low", "normal": "Normal", "high": "High"}
+
+# Key aliases: the model decides what to emit, and it is not consistent about it.
+# First match wins, so the documented name is listed first in each tuple.
+ATTACHMENT_FILENAME_KEYS = ("filename", "file_name", "name")
+ATTACHMENT_CONTENT_KEYS = ("content_base64", "content", "data", "base64", "content_bytes")
+ATTACHMENT_TYPE_KEYS = ("content_type", "mime_type", "mimetype", "type")
 
 
 # ---------------------------------------------------------------------------
@@ -128,6 +149,10 @@ ERROR_MAP: list[tuple[type[BaseException] | None, str]] = [
     (_err("ErrorInvalidSmtpAddress"), "Exchange rejected one of the addresses as invalid."),
     (_err("ErrorInvalidRecipients"), "Exchange rejected one or more recipients."),
     (_err("ErrorMissingEmailAddress"), "A required email address was missing."),
+    (
+        _err("ErrorAttachmentSizeLimitExceeded"),
+        "The attachments exceed the size limit configured on the server.",
+    ),
     (_err("ErrorMessageSizeExceeded"), "The message exceeds the size limit configured on the server."),
     (_err("ErrorQuotaExceeded"), "The mailbox quota is exceeded."),
     (_err("ErrorTimeoutExpired"), "Exchange timed out while processing the request. Please try again."),
@@ -307,6 +332,264 @@ def normalise_importance(value: object) -> tuple[str, str]:
     if resolved:
         return resolved, ""
     return "Normal", f"Unknown importance '{text}' was replaced with 'Normal'."
+
+
+# ---------------------------------------------------------------------------
+# Attachments
+#
+# The model supplies file content as base64 text, so every step here has to
+# assume sloppy input: a JSON array that is really a JSON object, a data URI
+# instead of bare base64, a filename carrying a path. Anything unusable is
+# rejected with a reason the user can act on - a message with the wrong file
+# attached is worse than a message that was not sent.
+#
+# Attachment content is never echoed back into the chat. Only name, size and
+# content type ever reach an output block.
+# ---------------------------------------------------------------------------
+
+
+class AttachmentError(ValueError):
+    """An attachment that cannot be used. The message is shown to the user."""
+
+
+def _first_key(item: dict[str, Any], keys: tuple[str, ...]) -> str:
+    """Return the first non-empty value among `keys`, matched case-insensitively."""
+    lowered = {str(k).strip().lower(): v for k, v in item.items()}
+    for key in keys:
+        value = lowered.get(key)
+        if value is not None and str(value).strip():
+            return str(value).strip()
+    return ""
+
+
+def parse_attachments(value: object) -> list[dict[str, str]]:
+    """Normalise the raw `attachments` argument into a list of specifications.
+
+    Accepts a JSON string (array or single object), an already-decoded list or
+    dict, or None/empty. Returns dicts with the keys 'filename',
+    'content_base64' and 'content_type'; the content is still base64 text at
+    this point. Raises AttachmentError for input that cannot be interpreted.
+    """
+    if value is None:
+        return []
+
+    if isinstance(value, (str, bytes)):
+        text = value.decode("utf-8", "replace") if isinstance(value, bytes) else value
+        text = text.strip()
+        if not text:
+            return []
+        try:
+            value = json.loads(text)
+        except (ValueError, TypeError) as exc:
+            raise AttachmentError(
+                "the 'attachments' argument is not valid JSON. Expected a JSON array such as "
+                '[{"filename": "report.pdf", "content_base64": "…"}].'
+            ) from exc
+
+    if isinstance(value, dict):
+        value = [value]
+    if not isinstance(value, (list, tuple)):
+        raise AttachmentError(
+            "the 'attachments' argument must be a JSON array of objects, each with a 'filename' "
+            "and a 'content_base64' field."
+        )
+
+    specs: list[dict[str, str]] = []
+    for index, raw in enumerate(value, start=1):
+        if not isinstance(raw, dict):
+            raise AttachmentError(f"attachment {index} is not an object with 'filename' and 'content_base64' fields.")
+        content = _first_key(raw, ATTACHMENT_CONTENT_KEYS)
+        if not content:
+            name = _first_key(raw, ATTACHMENT_FILENAME_KEYS) or f"attachment {index}"
+            raise AttachmentError(f"attachment '{name}' has no base64 content ('content_base64').")
+        specs.append(
+            {
+                "filename": _first_key(raw, ATTACHMENT_FILENAME_KEYS),
+                "content_base64": content,
+                "content_type": _first_key(raw, ATTACHMENT_TYPE_KEYS),
+            }
+        )
+    return specs
+
+
+def sanitize_filename(name: str, index: int) -> tuple[str, str]:
+    """Reduce a model-supplied filename to a safe basename.
+
+    Returns (filename, note). A name that is missing or sanitises away entirely
+    is replaced with a generated one, visibly rather than silently.
+    """
+    original = (name or "").strip().strip('"').strip()
+    # Take the basename for both separator styles before stripping the rest, so
+    # '../../etc/passwd' and 'C:\temp\x.txt' both collapse to the final segment.
+    cleaned = re.split(r"[/\\]", original)[-1]
+    cleaned = UNSAFE_FILENAME_RE.sub("", cleaned).strip().strip(".").strip()
+
+    if not cleaned:
+        return f"{FALLBACK_ATTACHMENT_FILENAME}-{index}", (
+            f"Attachment {index} had no usable filename; it was named '{FALLBACK_ATTACHMENT_FILENAME}-{index}'."
+        )
+
+    note = ""
+    if len(cleaned) > MAX_ATTACHMENT_FILENAME_LENGTH:
+        stem, dot, suffix = cleaned.rpartition(".")
+        if dot and len(suffix) <= 10:
+            keep = MAX_ATTACHMENT_FILENAME_LENGTH - len(suffix) - 1
+            cleaned = f"{stem[:keep]}.{suffix}"
+        else:
+            cleaned = cleaned[:MAX_ATTACHMENT_FILENAME_LENGTH]
+        note = f"The filename of attachment {index} was too long and has been shortened to '{cleaned}'."
+    elif cleaned != original:
+        note = f"The filename of attachment {index} was changed to '{cleaned}'."
+    return cleaned, note
+
+
+def decode_attachment_content(raw: str, filename: str) -> tuple[bytes, str]:
+    """Decode base64 text into bytes.
+
+    Returns (content, content_type_hint) - the hint is non-empty only when the
+    input was a data URI that declared one. Tolerates whitespace, data URI
+    prefixes, the URL-safe alphabet and missing padding, because all four turn
+    up in model output. Raises AttachmentError on anything else.
+    """
+    text = (raw or "").strip()
+    hint = ""
+
+    match = DATA_URI_RE.match(text)
+    if match:
+        hint = (match.group(1) or "").strip().lower()
+        text = text[match.end() :]
+
+    text = re.sub(r"\s+", "", text)
+    if not text:
+        raise AttachmentError(f"attachment '{filename}' has no base64 content ('content_base64').")
+
+    # The URL-safe alphabet decodes to the same bytes once translated; accepting
+    # it costs nothing and avoids rejecting otherwise valid content.
+    text = text.replace("-", "+").replace("_", "/")
+    padding = -len(text) % 4
+    if padding == 3:
+        raise AttachmentError(f"the base64 content of attachment '{filename}' is truncated.")
+    text += "=" * padding
+
+    try:
+        content = base64.b64decode(text, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise AttachmentError(
+            f"the content of attachment '{filename}' is not valid base64. Provide the raw file "
+            "bytes encoded as standard base64."
+        ) from exc
+
+    # No emptiness check here: the only base64 string that decodes to zero bytes
+    # is the empty one, and that was already rejected above.
+    return content, hint
+
+
+def resolve_content_type(declared: str, filename: str, hint: str = "") -> str:
+    """Pick a MIME type: the declared one, else the filename, else a generic one."""
+    for candidate in (declared, hint):
+        text = (candidate or "").strip().lower()
+        # A bare 'pdf' or a stray 'null' is not a MIME type; require type/subtype.
+        if text and "/" in text and " " not in text:
+            return text
+    guessed, _ = mimetypes.guess_type(filename)
+    return guessed or DEFAULT_ATTACHMENT_CONTENT_TYPE
+
+
+def format_size(num_bytes: int) -> str:
+    """Human-readable byte count for the output blocks."""
+    if num_bytes < 1024:
+        return f"{num_bytes} B"
+    if num_bytes < BYTES_PER_MB:
+        return f"{num_bytes / 1024:.1f} KB"
+    return f"{num_bytes / BYTES_PER_MB:.1f} MB"
+
+
+def build_attachments(specs: list[dict[str, str]], valves: Any) -> tuple[list[dict[str, Any]], list[str]]:
+    """Turn parsed specifications into ready-to-send attachments.
+
+    Returns (attachments, notes); each attachment carries 'filename', 'content'
+    (bytes), 'content_type' and 'size'. Policy violations raise AttachmentError
+    so the whole message is rejected - silently dropping a file the user asked
+    to attach would be worse than a clear failure.
+    """
+    if not specs:
+        return [], []
+
+    max_count = max(1, int(valves.max_attachments))
+    if len(specs) > max_count:
+        raise AttachmentError(
+            f"the message has {len(specs)} attachments, which exceeds the configured limit of {max_count}."
+        )
+
+    # split_domain_list is a generic lowercasing comma/semicolon splitter; the
+    # lstrip lets an administrator write either 'exe' or '.exe'.
+    blocked = {entry.lstrip(".") for entry in split_domain_list(valves.blocked_attachment_extensions)}
+    per_file_limit = max(1, int(valves.max_attachment_size_mb)) * BYTES_PER_MB
+    total_limit = max(1, int(valves.max_total_attachment_size_mb)) * BYTES_PER_MB
+
+    attachments: list[dict[str, Any]] = []
+    notes: list[str] = []
+    total = 0
+
+    for index, spec in enumerate(specs, start=1):
+        filename, name_note = sanitize_filename(spec.get("filename", ""), index)
+        if name_note:
+            notes.append(name_note)
+
+        extension = filename.rpartition(".")[2].lower() if "." in filename else ""
+        if extension and extension in blocked:
+            raise AttachmentError(f"attachment '{filename}' has the blocked file extension '.{extension}'.")
+
+        content, hint = decode_attachment_content(spec.get("content_base64", ""), filename)
+        size = len(content)
+        if size > per_file_limit:
+            raise AttachmentError(
+                f"attachment '{filename}' is {format_size(size)}, which exceeds the per-file limit of "
+                f"{format_size(per_file_limit)}."
+            )
+
+        total += size
+        if total > total_limit:
+            raise AttachmentError(
+                f"the attachments total {format_size(total)}, which exceeds the combined limit of "
+                f"{format_size(total_limit)}."
+            )
+
+        attachments.append(
+            {
+                "filename": filename,
+                "content": content,
+                "content_type": resolve_content_type(spec.get("content_type", ""), filename, hint),
+                "size": size,
+            }
+        )
+
+    return attachments, notes
+
+
+def format_attachments(attachments: list[dict[str, Any]]) -> str:
+    """Summarise attachments by count and total size, like the Bcc line does.
+
+    Filenames are deliberately left out of the result blocks, which end up in
+    the chat transcript. They do still appear in notes and error messages, where
+    naming the offending file is what makes the message actionable - and in the
+    confirmation dialog, see format_attachment_names.
+    """
+    if not attachments:
+        return "(none)"
+    total = sum(a["size"] for a in attachments)
+    return f"{len(attachments)} file(s), {format_size(total)}"
+
+
+def format_attachment_names(attachments: list[dict[str, Any]]) -> str:
+    """List attachments by name and size for the confirmation dialog.
+
+    The dialog is the one place where naming the files is worth it: it is the
+    guard against a manipulated model context, and deciding whether to send
+    means knowing *which* file goes out. Nothing has been delivered or written
+    to the transcript at this point.
+    """
+    return ", ".join(f"{a['filename']} ({format_size(a['size'])})" for a in attachments)
 
 
 def build_version(build_string: str) -> Any:
@@ -492,6 +775,14 @@ def perform_send(valves: Any, user_valves: Any, spec: dict[str, Any]) -> dict[st
     )
     if spec["reply_to"]:
         message.reply_to = list(spec["reply_to"])
+    if spec.get("attachments"):
+        # Assigned rather than passed to the constructor, like reply_to above.
+        # The content is already decoded and policy-checked, so nothing here can
+        # fail for a reason the user would need explained.
+        message.attachments = [
+            FileAttachment(name=a["filename"], content=a["content"], content_type=a["content_type"])
+            for a in spec["attachments"]
+        ]
 
     # save_copy=True is exchangelib's default and resolves account.sent *before*
     # sending, so a failure on that path means nothing was delivered.
@@ -578,6 +869,7 @@ def success_block(spec: dict[str, Any], valves: Any, notes: list[str]) -> str:
         f"Subject:    {spec['subject']}",
         f"Format:     {'HTML' if spec['is_html'] else 'plain text'}",
         f"Importance: {spec['importance']}",
+        f"Attachments: {format_attachments(spec.get('attachments', []))}",
         f"Saved to Sent Items: {'yes' if valves.save_to_sent_items else 'no'}",
     ]
     lines.extend(notes)
@@ -602,6 +894,7 @@ def dry_run_block(spec: dict[str, Any], valves: Any, endpoint_label: str, notes:
         f"Subject:    {spec['subject']}",
         f"Format:     {'HTML' if spec['is_html'] else 'plain text'}",
         f"Importance: {spec['importance']}",
+        f"Attachments: {format_attachments(spec.get('attachments', []))}",
         f"Server:     {endpoint_label} (auth: {valves.auth_type})",
         f"Saved to Sent Items: {'yes' if valves.save_to_sent_items else 'no'}",
         f"Body preview (first {BODY_PREVIEW_CHARS} characters):",
@@ -702,6 +995,31 @@ class Tools:
             description="Maximum total number of recipients (To + Cc + Bcc) per message. The message is "
             "rejected entirely when the limit is exceeded.",
         )
+        allow_attachments: bool = Field(
+            default=True,
+            description="Allow the model to attach files to a message. When disabled, a message that "
+            "carries attachments is rejected instead of being sent without them.",
+        )
+        max_attachments: int = Field(
+            default=5,
+            description="Maximum number of attachments per message. The message is rejected entirely "
+            "when the limit is exceeded.",
+        )
+        max_attachment_size_mb: int = Field(
+            default=10,
+            description="Maximum size of a single attachment in MB, measured after base64 decoding. "
+            "Keep this below the attachment limit configured on the Exchange server.",
+        )
+        max_total_attachment_size_mb: int = Field(
+            default=25,
+            description="Maximum combined size of all attachments in MB, measured after base64 "
+            "decoding. Keep this below the message size limit configured on the Exchange server.",
+        )
+        blocked_attachment_extensions: str = Field(
+            default="exe,com,bat,cmd,scr,pif,vbs,vbe,js,jse,ws,wsf,wsh,ps1,msi,msp,jar,dll,hta,cpl,lnk,reg",
+            description="Comma-separated list of file extensions that may not be attached. Matching is "
+            "case-insensitive; a leading dot is optional. Empty means every extension is allowed.",
+        )
         auto_detect_html: bool = Field(
             default=True,
             description="Treat a body as HTML when it clearly contains HTML markup, even if the model did not "
@@ -759,12 +1077,13 @@ class Tools:
         body_is_html: bool = False,
         importance: str = "Normal",
         reply_to: str = "",
+        attachments: str = "",
         __user__: dict | None = None,
         __event_emitter__: Callable[[dict], Awaitable[None]] | None = None,
         __event_call__: Callable[[dict], Awaitable[Any]] | None = None,
     ) -> str:
         """
-        Send an email from the user's own Exchange mailbox.
+        Send an email from the user's own Exchange mailbox, optionally with file attachments.
 
         :param to: Recipient email addresses separated by commas. At least one is required.
         :param subject: Subject line of the email. Must not be empty.
@@ -774,6 +1093,11 @@ class Tools:
         :param body_is_html: Set to true when the body contains HTML markup instead of plain text.
         :param importance: Message importance: Low, Normal or High. Defaults to Normal.
         :param reply_to: Optional reply-to addresses separated by commas.
+        :param attachments: Optional file attachments as a JSON array, for example
+            [{"filename": "report.pdf", "content_base64": "JVBERi0xLjQK...", "content_type": "application/pdf"}].
+            content_base64 must be the file's raw bytes encoded as standard base64. content_type is
+            optional and is derived from the filename when omitted. Leave this empty when there is
+            nothing to attach; never invent or guess the base64 content of a file you do not have.
         """
         valves = self.valves
         user_valves = resolve_user_valves(__user__, self.UserValves)
@@ -865,6 +1189,18 @@ class Tools:
                 clean_body = sanitize_html(clean_body)
             clean_body = append_signature(clean_body, user_valves.signature, is_html)
 
+            attachment_items: list[dict[str, Any]] = []
+            try:
+                attachment_specs = parse_attachments(attachments)
+                if attachment_specs:
+                    if not valves.allow_attachments:
+                        return await fail("file attachments are disabled by the administrator.")
+                    await status("Processing attachments…")
+                    attachment_items, attachment_notes = build_attachments(attachment_specs, valves)
+                    notes.extend(f"Note: {note}" for note in attachment_notes)
+            except AttachmentError as exc:
+                return await fail(str(exc))
+
             spec = {
                 "sender": sender,
                 "to": to_list,
@@ -875,6 +1211,7 @@ class Tools:
                 "body": clean_body,
                 "is_html": is_html,
                 "importance": resolved_importance,
+                "attachments": attachment_items,
             }
 
             _, endpoint_label = resolve_endpoint(valves)
@@ -896,6 +1233,7 @@ class Tools:
                     )
                 await status("Waiting for your confirmation…")
                 bcc_note = f"\nBcc: {len(bcc_list)} recipient(s)" if bcc_list else ""
+                attachment_note = f"\nAnhänge: {format_attachment_names(attachment_items)}" if attachment_items else ""
                 confirmed = await request_confirmation(
                     __event_call__,
                     "Wollen Sie diese E-Mail wirklich versenden?",
@@ -904,7 +1242,8 @@ class Tools:
                     f"Cc: {_format_addresses(cc_list)}"
                     f"{bcc_note}\n"
                     f"Betreff: {clean_subject}\n"
-                    f"Format: {'HTML' if is_html else 'Reiner Text'}\n\n\n"
+                    f"Format: {'HTML' if is_html else 'Reiner Text'}"
+                    f"{attachment_note}\n\n\n"
                     "Jetzt senden?",
                 )
                 if not confirmed:
